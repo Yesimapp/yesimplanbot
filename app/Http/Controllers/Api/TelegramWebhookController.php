@@ -36,7 +36,7 @@ class TelegramWebhookController extends Controller
         );
 
         // Запрос к OpenAI GPT (замени 'test' на вызов метода askGpt)
-        $reply = 'test';//$this->askGpt($data['message']);
+        $reply = $this->askRag($data['message']);//'test';//$this->askGpt($data['message']);
 
         // Сохраняем в одной записи вопрос и ответ
         TelegramMessage::create([
@@ -49,7 +49,33 @@ class TelegramWebhookController extends Controller
         return response()->json(['reply' => $reply]);
     }
 
-    private function askGpt(string $text): string
+
+    private function askRag(string $query): string
+    {
+        try {
+            $response = Http::timeout(5)->post('http://127.0.0.1:8000/rag', [
+                'query' => $query,
+            ]);
+
+            if ($response->successful() && isset($response['result'])) {
+                return $response['result'];
+            }
+
+            Log::error('RAG API error', [
+                'status' => $response->status(),
+                'body'   => $response->body(),
+            ]);
+
+            return '❌ Ошибка от RAG.';
+        } catch (\Exception $e) {
+            Log::error('RAG exception', ['message' => $e->getMessage()]);
+            return '❌ RAG-сервер недоступен.';
+        }
+    }
+
+
+
+    private function askGpt_old(string $text): string
     {
         $systemPrompt = config('app.system_prompt', '');
 
