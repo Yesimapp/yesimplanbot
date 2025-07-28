@@ -41,15 +41,15 @@ class TelegramMessageResource extends Resource
 
                 TextColumn::make('question')
                     ->label('Question')
-                    ->limit(50)
                     ->sortable()
-                    ->searchable(),
+                    ->searchable()
+                    ->extraAttributes(['style' => 'white-space: normal; word-break: break-word;']),
 
                 TextColumn::make('answer')
                     ->label('Answer')
-                    ->limit(50)
                     ->sortable()
-                    ->searchable(),
+                    ->searchable()
+                    ->extraAttributes(['style' => 'white-space: normal; word-break: break-word;']),
 
                 TextColumn::make('created_at')
                     ->label('Date')
