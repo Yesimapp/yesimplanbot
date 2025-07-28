@@ -6,6 +6,7 @@
 /storage/*.key
 /vendor
 /venv
+/hf_cache
 /__pycache__
 .env
 .env.backup

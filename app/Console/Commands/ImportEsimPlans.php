@@ -54,7 +54,7 @@ class ImportEsimPlans extends Command
         }
     }
 
-    private function buildTextForEmbedding(array $plan): string
+    private function buildTextForEmbedding_test(array $plan): string
     {
         return implode(' ', [
             $plan['planName'] ?? '',
@@ -63,6 +63,41 @@ class ImportEsimPlans extends Command
             $plan['priceInfo'] ?? '',
         ]);
     }
+
+    private function buildTextForEmbedding(array $plan): string
+    {
+        $country = is_array($plan['country']) ? implode(', ', $plan['country']) : $plan['country'];
+        $country_code = is_array($plan['country_code']) ? implode(', ', $plan['country_code']) : $plan['country_code'];
+
+        return implode(' ', [
+            "Plan name:",
+            $plan['planName'] ?? '',
+
+            "Data:",
+            $plan['capacityInfo'] ?? (($plan['capacity'] ?? '') . ' ' . ($plan['capacity_unit'] ?? '')),
+
+            "Valid for:",
+            $plan['period'] ?? '',
+
+            "Countries:",
+            $country,
+
+            "Country codes:",
+            $country_code,
+
+            "Price info:",
+            $plan['priceInfo'] ?? '',
+
+            "Currency:",
+            $plan['currency'] ?? '',
+
+            "Price:",
+            isset($plan['price']) ? number_format($plan['price'], 2) : '',
+        ]);
+    }
+
+
+
 
     private function generateEmbedding(string $text): ?array
     {
