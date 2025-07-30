@@ -9,6 +9,7 @@ use App\Models\TelegramUser;
 use App\Models\TelegramMessage;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
+use App\Models\Setting;
 
 class TelegramWebhookController extends Controller
 {
@@ -42,8 +43,15 @@ class TelegramWebhookController extends Controller
             $country = $nlp['country'];
             $days = $nlp['days'];
 
+            //отправляем к боту если не нашел вытащить данные по стране и по количеству дней
             if (empty($country) && empty($days)) {
-                $reply = "❌ Ошибка: не удалось определить страну и количество дней.";
+                $plans = collect();
+                $reply = $this->askGptWithPlans($data['message'], $plans, $user->id);
+                TelegramMessage::create([
+                    'telegram_user_id' => $user->id,
+                    'question'         => $data['message'],
+                    'answer'           => $reply,
+                ]);
                 return response()->json(['reply' => $reply]);
             }
 
@@ -58,21 +66,9 @@ class TelegramWebhookController extends Controller
             }
 
             $plans = $query->get();
-            $reply = $this->askGptWithPlans($data['message'], $plans);
+            $reply = $this->askGptWithPlans($data['message'], $plans, $user->id);
 
             \Log::info('Plans found:', ['count' => $plans->count()]);
-
-            if ($plans->isEmpty()) {
-              //  $reply = "😕 К сожалению, подходящих eSIM-планов не найдено.";
-            } else {
-                //$reply = "Для поездки в {$country}" . ($days ? " на {$days} дней" : "") . " рекомендую:\n\n";
-
-                foreach ($plans as $plan) {
-                  //  $reply .= "Plan: {$plan->plan_name}\n";
-                   // $reply .= "Цена: {$plan->price} {$plan->currency}\n";
-                   // $reply .= "Срок действия: {$plan->period} дней\n\n";
-                }
-            }
 
             TelegramMessage::create([
                 'telegram_user_id' => $user->id,
@@ -87,11 +83,41 @@ class TelegramWebhookController extends Controller
                 'trace'   => $e->getTraceAsString(),
             ]);
 
+            $error_server = trim(Setting::get('error_server'));
             return response()->json([
-                'reply' => '❌ Внутренняя ошибка сервера.',
+                'reply' => '❌ ' . $error_server,
                 'error' => $e->getMessage(),
             ], 500);
         }
+    }
+
+    private function getConversationHistory(int $telegramUserId, int $limit = 10): array
+    {
+        $messages = TelegramMessage::where('telegram_user_id', $telegramUserId)
+            ->orderBy('id', 'desc')
+            ->take($limit)
+            ->get()
+            ->reverse();
+
+        $history = [];
+
+        foreach ($messages as $msg) {
+            if ($msg->question) {
+                $history[] = [
+                    'role' => 'user',
+                    'content' => $msg->question,
+                ];
+            }
+
+            if ($msg->answer) {
+                $history[] = [
+                    'role' => 'assistant',
+                    'content' => $msg->answer,
+                ];
+            }
+        }
+
+        return $history;
     }
 
     private function askNlp(string $query): array
@@ -124,50 +150,45 @@ class TelegramWebhookController extends Controller
         ];
     }
 
-    private function askGptWithPlans(string $userMessage, $plans): string
+    private function askGptWithPlans(string $userMessage, $plans, int $telegramUserId): string
     {
-        // Твой системный промпт
-        $systemPrompt = <<<PROMPT
-Ты — вежливый цифровой помощник, отлично разбирающийся в eSIM-планах от компании Yesim.
-
-Твоя задача — помогать пользователю выбирать eSIM-план для поездок за границу. На основе его сообщения определи:
-- страну, куда он едет,
-- количество дней,
-- возможные предпочтения (например, объём трафика).
-
-Используй только те данные, которые есть в API. Если в конкретном плане указано наличие звонков — можешь это упомянуть, но не делай на этом акцент. Основной фокус — интернет-планы.
-
-Если пользователь задаёт вопрос, не связанный с поездками, странами, eSIM, интернетом, мобильной связью или Yesim, вежливо откажись и скажи:
-
-«Я пока не умею отвечать на такие вопросы. Но если тебе нужна eSIM для поездки — я помогу с радостью! ✈️»
-
-Если ты не уверен в точном ответе — не выдумывай. Лучше скажи:
-
-«Я не уверен в этом, но по части eSIM от Yesim знаю всё. Напиши, куда ты едешь и на сколько дней — я подскажу подходящий план 🌍»
-
-Будь дружелюбным, лаконичным и полезным.
-PROMPT;
+        $systemPrompt = trim(Setting::get('system_prompt'));
+        $limit_records = (int) trim(Setting::get('message_history_limit'));
+        $temperature = (float) trim(Setting::get('temperature'));
+        $max_tokens = (int) trim(Setting::get('max_tokens'));
 
         if ($plans->isEmpty()) {
             $plansDescription = "К сожалению, подходящих eSIM-планов не найдено.";
         } else {
             $plansDescription = "";
             foreach ($plans as $plan) {
-                $plansDescription .= "Plan: {$plan->plan_name}\n";
-                $plansDescription .= "Цена: {$plan->price} {$plan->currency}\n";
-                $plansDescription .= "Срок действия: {$plan->period} дней\n\n";
+                $plansDescription .= "🌐 Plan name: {$plan->plan_name}\n";
+                $plansDescription .= "💰 Price: {$plan->price} {$plan->currency}\n";
+                $plansDescription .= "📅 Validity period: {$plan->period} дней\n\n";
             }
         }
 
         $userContent = "Пользователь написал: \"$userMessage\"\n\nВот доступные планы:\n" . $plansDescription;
 
+        $conversationHistory = $telegramUserId
+            ? $this->getConversationHistory($telegramUserId, $limit_records)
+            : [];
+
+        // Добавляем текущее сообщение
+        $messages = array_merge(
+            [['role' => 'system', 'content' => $systemPrompt]],
+            $conversationHistory,
+            [['role' => 'user', 'content' => $userContent]]
+        );
+
+        Log::error('message', ['message' => $messages]);
+
         $response = Http::withToken(env('OPENAI_API_KEY'))
             ->post('https://api.openai.com/v1/chat/completions', [
-                'model' => env('OPENAI_MODEL', 'gpt-3.5-turbo'),
-                'messages' => [
-                    ['role' => 'system', 'content' => $systemPrompt],
-                    ['role' => 'user', 'content' => $userContent],
-                ],
+                'model'       => env('OPENAI_MODEL', 'gpt-3.5-turbo'),
+                'messages'    => $messages,
+                'temperature' => $temperature,
+                'max_tokens'  => $max_tokens
             ]);
 
         if ($response->successful()) {
