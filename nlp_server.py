@@ -73,7 +73,7 @@ def extract_info(data: InputText):
     text_lower = data.text.lower()
     doc = nlp(text_lower)
 
-    # Ищем количество дней (day, days)
+    # Ищем количество дней
     days = None
     match = re.search(r'(\d+)\s*(day|days)', text_lower)
     if match:
@@ -81,7 +81,7 @@ def extract_info(data: InputText):
 
     country = None
 
-    # Ищем среди сущностей GPE (страны, города)
+    # Ищем среди сущностей GPE
     for ent in doc.ents:
         if ent.label_ == "GPE":
             name = ent.text.lower()
