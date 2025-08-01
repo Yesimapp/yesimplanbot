@@ -182,8 +182,11 @@ class TelegramWebhookController extends Controller
         $max_tokens = (int) trim(Setting::get('max_tokens'));
 
         if ($plans->isEmpty()) {
-            $plansDescription = "К сожалению, подходящих eSIM-планов не найдено.";
+            // Если нет планов — вызываем RAG для поиска релевантных текстов
+            $ragResult = $this->askRag($userMessage);
+            $plansDescription = "RAG-система нашла следующее:\n" . $ragResult;
         } else {
+            // Если планы есть — формируем описание
             $plansDescription = "";
             foreach ($plans as $plan) {
                 $plansDescription .= "🌐 Plan name: {$plan->plan_name}\n";
@@ -192,20 +195,19 @@ class TelegramWebhookController extends Controller
             }
         }
 
-        $userContent = "Пользователь написал: \"$userMessage\"\n\nВот доступные планы:\n" . $plansDescription;
+        $userContent = "Пользователь написал: \"$userMessage\"\n\nКонтекст для ответа:\n" . $plansDescription;
 
         $conversationHistory = $telegramUserId
             ? $this->getConversationHistory($telegramUserId, $limit_records)
             : [];
 
-        // Добавляем текущее сообщение
         $messages = array_merge(
             [['role' => 'system', 'content' => $systemPrompt]],
             $conversationHistory,
             [['role' => 'user', 'content' => $userContent]]
         );
 
-        Log::error('message', ['message' => $messages]);
+        Log::info('Message to GPT', ['messages' => $messages]);
 
         $response = Http::withToken(env('OPENAI_API_KEY'))
             ->post('https://api.openai.com/v1/chat/completions', [
@@ -217,7 +219,6 @@ class TelegramWebhookController extends Controller
 
         if ($response->successful()) {
             $json = $response->json();
-
             if (isset($json['choices'][0]['message']['content'])) {
                 return trim($json['choices'][0]['message']['content']);
             }
@@ -230,5 +231,4 @@ class TelegramWebhookController extends Controller
 
         return '❌ Ошибка от GPT.';
     }
-
 }
