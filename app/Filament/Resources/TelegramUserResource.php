@@ -21,7 +21,7 @@ class TelegramUserResource extends Resource
 
     public static function getNavigationSort(): ?int
     {
-        return 1; // Порядок внутри группы
+        return 1; // Порядок
     }
 
     public static function form(Form $form): Form
@@ -49,10 +49,6 @@ class TelegramUserResource extends Resource
     {
         return [
             'index' => Pages\ListTelegramUsers::route('/'),
-            // Можно отключить create/edit/view, если не нужно:
-            //'create' => Pages\CreateTelegramUser::route('/create'),
-            //'edit' => Pages\EditTelegramUser::route('/{record}/edit'),
-            //'view' => Pages\ViewTelegramUser::route('/{record}'),
         ];
     }
 

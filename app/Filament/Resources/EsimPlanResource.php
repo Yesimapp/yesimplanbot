@@ -19,7 +19,7 @@ class EsimPlanResource extends Resource
 
     public static function getNavigationSort(): ?int
     {
-        return 3; // Порядок внутри группы
+        return 3; // Порядок
     }
 
     public static function form(Form $form): Form
