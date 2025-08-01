@@ -3,116 +3,104 @@ from pydantic import BaseModel
 import spacy
 import re
 import difflib
+import mysql.connector
+import json
 
 app = FastAPI()
 
-# Загрузите модель командой:
-# python3 -m spacy download en_core_web_sm
-nlp = spacy.load("en_core_web_sm")
+# Загружаем модели spaCy
+nlp_en = spacy.load("en_core_web_sm")
+nlp_ru = spacy.load("ru_core_news_sm")
 
-COUNTRY_ALIASES = {
-    "turkey": "Turkey",
-    "japan": "Japan",
-    "ukraine": "Ukraine",
-    "italy": "Italy",
-    "france": "France",
-    "germany": "Germany",
-    "poland": "Poland",
-    "united states": "United States",
-    "usa": "United States",
-    "spain": "Spain",
-    "vietnam": "Vietnam",
-    "thailand": "Thailand",
-    "india": "India",
-    "egypt": "Egypt",
-    "georgia": "Georgia",
-    "kazakhstan": "Kazakhstan",
-    "czech republic": "Czech Republic",
-    "switzerland": "Switzerland",
-    "austria": "Austria",
-    "belgium": "Belgium",
-    "bulgaria": "Bulgaria",
-    "canada": "Canada",
-    "croatia": "Croatia",
-    "cyprus": "Cyprus",
-    "estonia": "Estonia",
-    "hungary": "Hungary",
-    "ireland": "Ireland",
-    "israel": "Israel",
-    "latvia": "Latvia",
-    "lithuania": "Lithuania",
-    "luxembourg": "Luxembourg",
-    "malta": "Malta",
-    "montenegro": "Montenegro",
-    "netherlands": "Netherlands",
-    "north macedonia": "North Macedonia",
-    "portugal": "Portugal",
-    "romania": "Romania",
-    "russia": "Russia",
-    "serbia": "Serbia",
-    "slovakia": "Slovakia",
-    "slovenia": "Slovenia",
-    "south africa": "South Africa",
-    "united arab emirates": "United Arab Emirates",
-    "uk": "United Kingdom",
-    "united kingdom": "United Kingdom",
-    "hong kong": "Hong Kong",
+# Подключение к БД
+db_config = {
+    "host": "127.0.0.1",
+    "user": "yesim_admin",
+    "password": "Pa55w0rd2025",
+    "database": "yesimbot",
+    "port": 3306,
 }
-
-def fuzzy_country_search(word: str):
-    matches = difflib.get_close_matches(word, COUNTRY_ALIASES.keys(), n=1, cutoff=0.7)
-    if matches:
-        return COUNTRY_ALIASES[matches[0]]
-    return None
 
 class InputText(BaseModel):
     text: str
 
+def is_russian(text: str) -> bool:
+    return bool(re.search('[а-яА-Я]', text))
+
+def get_countries_from_db():
+    """Загрузить из БД все страны с их aliases"""
+    conn = mysql.connector.connect(**db_config)
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT name_en, aliases FROM countries WHERE aliases IS NOT NULL")
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    countries = {}
+    for row in rows:
+        try:
+            aliases = json.loads(row['aliases'])
+        except Exception:
+            aliases = []
+        for alias in aliases:
+            countries[alias.lower()] = row['name_en']  # ключ — alias в нижнем регистре, значение — canonical English name
+        # Добавим также name_en в качестве алиаса
+        countries[row['name_en'].lower()] = row['name_en']
+    return countries
+
+def fuzzy_country_search(word: str, countries_dict):
+    matches = difflib.get_close_matches(word, countries_dict.keys(), n=1, cutoff=0.7)
+    if matches:
+        return countries_dict[matches[0]]
+    return None
+
 @app.post("/extract")
 def extract_info(data: InputText):
     text_lower = data.text.lower()
-    doc = nlp(text_lower)
 
-    # Ищем количество дней
+    # Определяем язык
+    doc = nlp_ru(text_lower) if is_russian(text_lower) else nlp_en(text_lower)
+
+    # Ищем количество дней (англ и рус)
     days = None
-    match = re.search(r'(\d+)\s*(day|days)', text_lower)
+    match = re.search(r'(\d+)\s*(day|days|день|дня|дней)', text_lower)
     if match:
         days = int(match.group(1))
 
     country = None
 
-    # Ищем среди сущностей GPE
+    countries_dict = get_countries_from_db()
+
+    # Ищем страну среди сущностей GPE
     for ent in doc.ents:
         if ent.label_ == "GPE":
             name = ent.text.lower()
-            if name in COUNTRY_ALIASES:
-                country = COUNTRY_ALIASES[name]
+            if name in countries_dict:
+                country = countries_dict[name]
                 break
             else:
-                fuzzy_result = fuzzy_country_search(name)
+                fuzzy_result = fuzzy_country_search(name, countries_dict)
                 if fuzzy_result:
                     country = fuzzy_result
                     break
 
-    # Если не нашли, проверяем токены
+    # Если не нашли через сущности, проверяем токены
     if not country:
         for token in doc:
             lemma = token.lemma_.lower()
             word = token.text.lower()
-
-            if lemma in COUNTRY_ALIASES:
-                country = COUNTRY_ALIASES[lemma]
+            if lemma in countries_dict:
+                country = countries_dict[lemma]
                 break
-            elif word in COUNTRY_ALIASES:
-                country = COUNTRY_ALIASES[word]
+            elif word in countries_dict:
+                country = countries_dict[word]
                 break
             else:
-                fuzzy_result = fuzzy_country_search(word)
+                fuzzy_result = fuzzy_country_search(word, countries_dict)
                 if fuzzy_result:
                     country = fuzzy_result
                     break
 
-    # Отладка (можно убрать)
+    # Отладка
     print("== DEBUG ==")
     print("INPUT:", data.text)
     print("ENTITIES:", [(ent.text, ent.label_) for ent in doc.ents])
