@@ -14,22 +14,16 @@ class TelegramMessageResource extends Resource
 {
     protected static ?string $model = TelegramMessage::class;
 
-    // Отключаем иконку, если не нужна
-    // protected static ?string $navigationIcon = 'heroicon-o-chat-bubble-left';
-
-
     public static function getNavigationSort(): ?int
     {
-        return 2; // Порядок внутри группы
+        return 2; // Порядок
     }
 
-    // Форма не нужна — пустая
     public static function form(\Filament\Resources\Form $form): \Filament\Resources\Form
     {
         return $form->schema([]);
     }
 
-    // Таблица с колонками
     public static function table(Table $table): Table
     {
         return $table
@@ -60,7 +54,6 @@ class TelegramMessageResource extends Resource
             ->defaultSort('created_at', 'desc');
     }
 
-    // Оставляем только страницу списка
     public static function getPages(): array
     {
         return [
@@ -68,7 +61,6 @@ class TelegramMessageResource extends Resource
         ];
     }
 
-    // Запрет на создание, редактирование и удаление из админки
     public static function canCreate(): bool
     {
         return false;

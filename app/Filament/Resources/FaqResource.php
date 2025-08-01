@@ -15,12 +15,12 @@ class FaqResource extends Resource
 {
     protected static ?string $model = Faq::class;
 
-    protected static ?string $navigationLabel = 'FAQs';
-    protected static ?string $pluralModelLabel = 'FAQs';
+    protected static ?string $navigationLabel = 'Q/A';
+    protected static ?string $pluralModelLabel = 'Q/A';
 
     public static function getNavigationSort(): ?int
     {
-        return 4;
+        return 998; // Порядок
     }
 
     public static function form(Form $form): Form

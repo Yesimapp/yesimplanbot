@@ -18,7 +18,7 @@ class SettingResource extends Resource
     protected static ?string $navigationLabel = 'Setting';
     public static function getNavigationSort(): ?int
     {
-        return 999; // Порядок внутри группы
+        return 999; // Порядок
     }
     public static function form(Form $form): Form
     {
@@ -61,8 +61,8 @@ class SettingResource extends Resource
                             default => null,
                         };
                     })
-                    ->wrap() // 👉 убирает горизонтальный скролл
-                    ->extraAttributes(['class' => 'whitespace-normal']), // на всякий случай
+                    ->wrap()
+                    ->extraAttributes(['class' => 'whitespace-normal']),
 
                 Tables\Columns\TextColumn::make('value')
                     ->label('Value')

@@ -20,7 +20,7 @@ class CountryResource extends Resource
     protected static ?string $navigationIcon = 'heroicon-o-collection';
     public static function getNavigationSort(): ?int
     {
-        return 4; // Порядок внутри группы
+        return 4; // Порядок
     }
     public static function form(Form $form): Form
     {
@@ -63,8 +63,7 @@ class CountryResource extends Resource
                 Tables\Columns\TextColumn::make('iso')->label('ISO')->sortable(),
                 Tables\Columns\TextColumn::make('aliases')
                     ->label('Aliases')
-                    ->limit(50)
-                    ->formatStateUsing(fn ($state) => is_array($state) ? implode(', ', $state) : $state),
+                    ->hidden()
             ])
             ->filters([
                 //
