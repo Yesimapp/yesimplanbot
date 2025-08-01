@@ -123,7 +123,7 @@ class TelegramWebhookController extends Controller
     private function askNlp(string $query): array
     {
         try {
-            $response = Http::timeout(5)->post('http://127.0.0.1:8000/extract', [
+            $response = Http::timeout(5)->post('http://127.0.0.1:8002/extract', [
                 'text' => $query,
             ]);
 
@@ -149,6 +149,30 @@ class TelegramWebhookController extends Controller
             'days'    => null,
         ];
     }
+
+    private function askRag(string $query): string
+    {
+        try {
+            $response = Http::timeout(5)->post('http://127.0.0.1:8001/rag', [
+                'query' => $query,
+            ]);
+
+            if ($response->successful() && isset($response['result'])) {
+                return $response['result'];
+            }
+
+            Log::error('RAG API error', [
+                'status' => $response->status(),
+                'body'   => $response->body(),
+            ]);
+
+            return '❌ Ошибка от RAG.';
+        } catch (\Exception $e) {
+            Log::error('RAG exception', ['message' => $e->getMessage()]);
+            return '❌ RAG-сервер недоступен.';
+        }
+    }
+
 
     private function askGptWithPlans(string $userMessage, $plans, int $telegramUserId): string
     {
