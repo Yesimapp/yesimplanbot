@@ -16,7 +16,7 @@ return new class extends Migration
             $table->unsignedBigInteger('external_id')->unique();
             $table->string('name_en');
             $table->string('name_ru')->nullable();
-            $table->string('iso', 2)->unique();
+            $table->string('iso', 2)->nullable();
             $table->json('aliases')->nullable();
             $table->timestamps();
         });
