@@ -50,12 +50,12 @@ class FaqResource extends Resource
 
                 TextColumn::make('question')
                     ->label('Question')
-                    ->limit(100)
+                    ->wrap()
                     ->tooltip(fn ($record) => $record->question),
 
                 TextColumn::make('answer')
                     ->label('Answer')
-                    ->limit(100)
+                    ->wrap()
                     ->tooltip(fn ($record) => $record->answer),
 
                 TextColumn::make('is_active')

@@ -84,6 +84,7 @@ class TelegramWebhookController extends Controller
             ]);
 
             $error_server = trim(Setting::get('error_server'));
+
             return response()->json([
                 'reply' => '❌ ' . $error_server,
                 'error' => $e->getMessage(),
@@ -153,82 +154,148 @@ class TelegramWebhookController extends Controller
     private function askRag(string $query): string
     {
         try {
-            $response = Http::timeout(5)->post('http://127.0.0.1:8001/rag', [
-                'query' => $query,
-            ]);
+            $response = Http::timeout(12)->post('http://127.0.0.1:8001/rag', ['query' => $query]);
 
-            if ($response->successful() && isset($response['result'])) {
-                return $response['result'];
+            if ($response->successful()) {
+                $json = $response->json();
+                if (!empty($json['ok']) && isset($json['context_text'])) {
+                    $facts = trim((string)($json['facts_text'] ?? ''));
+                    $ctx   = trim((string)($json['context_text'] ?? ''));
+                    return $facts !== '' ? $facts : $ctx; // приоритет — факты
+                }
             }
 
-            Log::error('RAG API error', [
-                'status' => $response->status(),
-                'body'   => $response->body(),
-            ]);
-
-            return '❌ Ошибка от RAG.';
+            Log::error('RAG API error', ['status' => $response->status(), 'body' => $response->body()]);
+            return '';
         } catch (\Exception $e) {
             Log::error('RAG exception', ['message' => $e->getMessage()]);
-            return '❌ RAG-сервер недоступен.';
+            return '';
         }
     }
 
-
     private function askGptWithPlans(string $userMessage, $plans, int $telegramUserId): string
     {
-        $systemPrompt = trim(Setting::get('system_prompt'));
-        $limit_records = (int) trim(Setting::get('message_history_limit'));
-        $temperature = (float) trim(Setting::get('temperature'));
-        $max_tokens = (int) trim(Setting::get('max_tokens'));
+        // --- настройки ---
+        $systemPrompt       = trim((string) Setting::get('system_prompt'));
+        $systemPromptRag    = trim((string) Setting::get('system_prompt_rag'));
+        $limitRecords       = (int)   (Setting::get('message_history_limit') ?? 5);
+        $temperature        = (float) (Setting::get('temperature') ?? 0.3);
+        $maxTokens          = (int)   (Setting::get('max_tokens') ?? 500);
+        $frequencyPenalty   = (float) (Setting::get('frequency_penalty') ?? 0.1);
+        $presencePenalty    = (float) (Setting::get('presence_penalty') ?? 0.0);
+        $topP               = (float) (Setting::get('top_p') ?? 1.0);
 
-        if ($plans->isEmpty()) {
-            // Если нет планов — вызываем RAG для поиска релевантных текстов
-            $ragResult = $this->askRag($userMessage);
-            $plansDescription = "RAG-система нашла следующее:\n" . $ragResult;
-        } else {
-            // Если планы есть — формируем описание
-            $plansDescription = "";
-            foreach ($plans as $plan) {
-                $plansDescription .= "🌐 Plan name: {$plan->plan_name}\n";
-                $plansDescription .= "💰 Price: {$plan->price} {$plan->currency}\n";
-                $plansDescription .= "📅 Validity period: {$plan->period} дней\n\n";
+        // --- формируем контекст и выбираем system prompt ---
+        if (!$plans || $plans->isEmpty()) {
+            // 1) small talk перехватываем ДО RAG
+            if ($this->isSmallTalk($userMessage)) {
+                return $this->smallTalkReply($userMessage);
             }
+
+            // 2) RAG-режим
+            $ragResult = $this->askRag($userMessage);
+            if ($ragResult === '' || trim($ragResult) === '') {
+                return "Пока не нашёл этого в базе. Могу помочь с eSIM‑планами — скажите страну и на сколько дней поездка.";
+            }
+
+            $effectiveSystemPrompt = $systemPromptRag !== '' ? $systemPromptRag : $systemPrompt;
+            $userContent =
+                "Пользователь: \"{$userMessage}\"\n\n" .
+                "Используй факты ниже для ответа человеческим языком (1–2 предложения). Источник не упоминай.\n" .
+                $ragResult; // здесь теперь чаще будет 'Факты из базы:\n- ...\n- ...'
+
+        } else {
+            // Режим с планами — выводим все планы
+            $plansDescription = '';
+            foreach ($plans as $plan) {
+                $name     = $plan->plan_name ?? ($plan->name ?? 'Unnamed plan');
+                $price    = $plan->price ?? '—';
+                $currency = $plan->currency ?? '';
+                $period   = $plan->period ?? $plan->validity ?? null;
+
+                $plansDescription .= "🌐 Plan name: {$name}\n";
+                $plansDescription .= "💰 Price: {$price}" . ($currency ? " {$currency}" : "") . "\n";
+                if ($period !== null) {
+                    $plansDescription .= "📅 Validity period: {$period} дней\n";
+                }
+                $plansDescription .= "\n";
+            }
+
+            $effectiveSystemPrompt = $systemPrompt;
+            $userContent = "Пользователь написал: \"{$userMessage}\"\n\nКонтекст для ответа:\n{$plansDescription}";
         }
 
-        $userContent = "Пользователь написал: \"$userMessage\"\n\nКонтекст для ответа:\n" . $plansDescription;
-
+        // --- история диалога ---
         $conversationHistory = $telegramUserId
-            ? $this->getConversationHistory($telegramUserId, $limit_records)
+            ? $this->getConversationHistory($telegramUserId, $limitRecords)
             : [];
 
+        // --- сборка сообщений ---
         $messages = array_merge(
-            [['role' => 'system', 'content' => $systemPrompt]],
-            $conversationHistory,
+            [['role' => 'system', 'content' => $effectiveSystemPrompt]],
+            (!$plans || $plans->isEmpty() ? $this->buildFewShotsForRag() : []), // few-shot только для RAG
+            $conversationHistory,                                               // <-- оставляем один раз
             [['role' => 'user', 'content' => $userContent]]
         );
 
         Log::info('Message to GPT', ['messages' => $messages]);
 
+        // --- вызов OpenAI ---
         $response = Http::withToken(env('OPENAI_API_KEY'))
             ->post('https://api.openai.com/v1/chat/completions', [
-                'model'       => env('OPENAI_MODEL', 'gpt-3.5-turbo'),
-                'messages'    => $messages,
-                'temperature' => $temperature,
-                'max_tokens'  => $max_tokens
+                'model'              => env('OPENAI_MODEL', 'gpt-4o'), // при желании обнови модель
+                'messages'           => $messages,
+                'temperature'        => $temperature,
+                'top_p'              => $topP,
+                'frequency_penalty'  => $frequencyPenalty,
+                'presence_penalty'   => $presencePenalty,
+                'max_tokens'         => $maxTokens,
             ]);
 
         if ($response->successful()) {
             $json = $response->json();
             if (isset($json['choices'][0]['message']['content'])) {
-                return trim($json['choices'][0]['message']['content']);
+                $answer = trim($json['choices'][0]['message']['content']);
+                return $answer !== '' ? $answer : 'Ответ пуст. Попробуйте переформулировать запрос.';
             }
         }
 
-        Log::error('OpenAI API error', [
-            'status' => $response->status(),
-            'body'   => $response->body(),
-        ]);
-
+        Log::error('OpenAI API error', ['status' => $response->status(), 'body' => $response->body()]);
         return '❌ Ошибка от GPT.';
     }
+
+    private function buildFewShotsForRag(): array
+    {
+        return [
+            ['role' => 'user', 'content' => 'привет!'],
+            ['role' => 'assistant', 'content' => 'Привет! Готов помочь с eSIM. Куда и на сколько дней планируете поездку?'],
+
+            ['role' => 'user', 'content' => 'поддерживается ли eSIM на моём телефоне?'],
+            ['role' => 'assistant', 'content' => 'Пока не нашёл этого в базе. Могу помочь с выбором плана: скажите страну и длительность поездки.'],
+        ];
+    }
+
+    private function isSmallTalk(string $text): bool {
+        // более надёжно для кириллицы и фразы "как дела"
+        return (bool) preg_match('/(привет|здравств|спасибо|как\s*дела|hi|hello)/iu', $text);
+    }
+
+    private function smallTalkReply(string $text): string {
+        $variants = [
+            "Привет! Готов помочь с eSIM. Куда и на сколько дней планируете поездку?",
+            "Здравствуйте! Подскажу по eSIM‑планам. В какую страну и на какой срок едете?",
+            "Привет! Давайте подберём eSIM. Скажите страну и длительность поездки.",
+        ];
+        return $variants[array_rand($variants)];
+    }
+
+    private function extractSlots(string $t): array {
+        return [
+            'country' => preg_match('/в\s+([A-Za-zА-Яа-яёЁ\- ]+)/u', $t, $m) ? trim($m[1]) : null,
+            'days'    => preg_match('/(\d+)\s*(дн|day|days)/iu', $t, $m) ? (int)$m[1] : null,
+            // трафик по желанию
+        ];
+    }
+
+
 }
