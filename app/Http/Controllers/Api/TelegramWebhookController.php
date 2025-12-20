@@ -37,22 +37,48 @@ class TelegramWebhookController extends Controller
             ]);
 
             $nlp = $this->askNlp($data['message']);
-
             \Log::info('NLP result:', $nlp);
 
             $country = $nlp['country'];
-            $days = $nlp['days'];
+            $days    = $nlp['days'];
+
+            // NEW: подстраховка — если внешний NLP не выдал слоты, попробуем извлечь их простыми регэкспами
+            if (empty($country) || empty($days)) {
+                $fallback = $this->extractSlots($data['message']);
+                if (empty($country) && !empty($fallback['country'])) {
+                    $country = $fallback['country'];
+                }
+                if (empty($days) && !empty($fallback['days'])) {
+                    $days = $fallback['days'];
+                }
+            }
+
+            // NEW: “живость” — если не хватает РОВНО одного слота, доспросим только его
+            if (empty($country) && !empty($days)) {
+                $reply = "Подскажите, в какую страну планируете поездку? 🙂";
+
+                $this->AddMessage($user->id, $data['message'], $reply);
+
+                return response()->json(['reply' => $reply]);
+            }
+
+            if (!empty($country) && empty($days)) {
+                $reply = "Отлично, {$country}! На сколько дней нужен интернет?";
+
+                $this->AddMessage($user->id, $data['message'], $reply);
+
+                return response()->json(['reply' => $reply]);
+            }
 
             //отправляем к боту если не нашел вытащить данные по стране и по количеству дней
             if (empty($country) && empty($days)) {
                 $plans = collect();
                 $reply = $this->askGptWithPlans($data['message'], $plans, $user->id);
-                TelegramMessage::create([
-                    'telegram_user_id' => $user->id,
-                    'question'         => $data['message'],
-                    'answer'           => $reply,
-                ]);
+
+                $this->AddMessage($user->id, $data['message'], $reply);
+
                 return response()->json(['reply' => $reply]);
+
             }
 
             $query = DB::table('esim_plans');
@@ -65,18 +91,18 @@ class TelegramWebhookController extends Controller
                 $query->where('country', 'LIKE', "%{$country}%");
             }
 
+            // ВАЖНО: никаких лимитов/сокращений — как просили, выводим ВСЕ планы
             $plans = $query->get();
+
+            // формат и логика вывода — как у тебя: askGptWithPlans соберёт полный список в том же виде
             $reply = $this->askGptWithPlans($data['message'], $plans, $user->id);
 
             \Log::info('Plans found:', ['count' => $plans->count()]);
 
-            TelegramMessage::create([
-                'telegram_user_id' => $user->id,
-                'question'         => $data['message'],
-                'answer'           => $reply,
-            ]);
+            $this->AddMessage($user->id, $data['message'], $reply);
 
             return response()->json(['reply' => $reply]);
+
         } catch (\Exception $e) {
             \Log::error('Exception in handle:', [
                 'message' => $e->getMessage(),
@@ -179,11 +205,6 @@ class TelegramWebhookController extends Controller
         $systemPrompt       = trim((string) Setting::get('system_prompt'));
         $systemPromptRag    = trim((string) Setting::get('system_prompt_rag'));
         $limitRecords       = (int)   (Setting::get('message_history_limit') ?? 5);
-        $temperature        = (float) (Setting::get('temperature') ?? 0.3);
-        $maxTokens          = (int)   (Setting::get('max_tokens') ?? 500);
-        $frequencyPenalty   = (float) (Setting::get('frequency_penalty') ?? 0.1);
-        $presencePenalty    = (float) (Setting::get('presence_penalty') ?? 0.0);
-        $topP               = (float) (Setting::get('top_p') ?? 1.0);
 
         // --- формируем контекст и выбираем system prompt ---
         if (!$plans || $plans->isEmpty()) {
@@ -205,7 +226,7 @@ class TelegramWebhookController extends Controller
                 $ragResult; // здесь теперь чаще будет 'Факты из базы:\n- ...\n- ...'
 
         } else {
-            // Режим с планами — выводим все планы
+            // Режим с планами — выводим все планы (как просили)
             $plansDescription = '';
             foreach ($plans as $plan) {
                 $name     = $plan->plan_name ?? ($plan->name ?? 'Unnamed plan');
@@ -241,6 +262,35 @@ class TelegramWebhookController extends Controller
         Log::info('Message to GPT', ['messages' => $messages]);
 
         // --- вызов OpenAI ---
+        $result = $this->SendGpt($messages);
+
+        return $result;
+    }
+
+
+    /*
+     * сохранение ответа в базе данных
+     * для дольнейше использования в истории сообщений
+     */
+    private function AddMessage($id , $message, $answer): bool
+    {
+        TelegramMessage::create([
+            'telegram_user_id' => $id,
+            'question'         => $message,
+            'answer'           => $answer,
+        ]);
+        return  true;
+    }
+
+    private function SendGpt($messages): string
+    {
+        $temperature        = (float) (Setting::get('temperature') ?? 0.3);
+        $maxTokens          = (int)   (Setting::get('max_tokens') ?? 500);
+        $frequencyPenalty   = (float) (Setting::get('frequency_penalty') ?? 0.1);
+        $presencePenalty    = (float) (Setting::get('presence_penalty') ?? 0.0);
+        $topP               = (float) (Setting::get('top_p') ?? 1.0);
+
+
         $response = Http::withToken(env('OPENAI_API_KEY'))
             ->post('https://api.openai.com/v1/chat/completions', [
                 'model'              => env('OPENAI_MODEL', 'gpt-4o'), // при желании обнови модель
@@ -262,6 +312,7 @@ class TelegramWebhookController extends Controller
 
         Log::error('OpenAI API error', ['status' => $response->status(), 'body' => $response->body()]);
         return '❌ Ошибка от GPT.';
+
     }
 
     private function buildFewShotsForRag(): array
@@ -291,11 +342,8 @@ class TelegramWebhookController extends Controller
 
     private function extractSlots(string $t): array {
         return [
-            'country' => preg_match('/в\s+([A-Za-zА-Яа-яёЁ\- ]+)/u', $t, $m) ? trim($m[1]) : null,
-            'days'    => preg_match('/(\d+)\s*(дн|day|days)/iu', $t, $m) ? (int)$m[1] : null,
-            // трафик по желанию
+            'country' => preg_match('/(?:в|to)\s+([A-Za-zА-Яа-яёЁ\- ]{2,})/u', $t, $m) ? trim($m[1]) : null, // NEW: поддержал "to Turkey"
+            'days'    => preg_match('/(\d{1,3})\s*(?:дн|дней|day|days)/iu', $t, $m) ? (int)$m[1] : (preg_match('/\bна\s+(\d{1,3})\b/iu', $t, $m2) ? (int)$m2[1] : null),
         ];
     }
-
-
 }
