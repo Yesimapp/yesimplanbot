@@ -1,0 +1,97 @@
+services:
+    # =========================
+    # MySQL
+    # =========================
+    mysql:
+        image: mysql:8.0
+        container_name: yesim_mysql
+        restart: unless-stopped
+        environment:
+            MYSQL_ROOT_PASSWORD: root
+            MYSQL_DATABASE: yesimbot
+            MYSQL_USER: yesim_admin
+            MYSQL_PASSWORD: Pa55w0rd2025
+        ports:
+            - "3306:3306"
+        volumes:
+            - mysql_data:/var/lib/mysql
+
+    # =========================
+    # Adminer (управление БД)
+    # =========================
+    adminer:
+        image: adminer
+        container_name: yesim_adminer
+        restart: unless-stopped
+        depends_on:
+            - mysql
+        ports:
+            - "8080:8080"
+
+    # =========================
+    # Laravel (PHP-FPM)
+    # =========================
+    laravel:
+        image: php:8.3-fpm
+        container_name: yesim_laravel
+        working_dir: /var/www/html
+        volumes:
+            - .:/var/www/html
+        depends_on:
+            - mysql
+
+    # =========================
+    # Nginx для Laravel
+    # =========================
+    nginx:
+        image: nginx:alpine
+        container_name: yesim_nginx
+        restart: unless-stopped
+        ports:
+            - "8000:80"
+        volumes:
+            - .:/var/www/html
+            - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
+        depends_on:
+            - laravel
+
+    # =========================
+    # NLP server
+    # =========================
+    nlp_server:
+        build:
+            context: .
+            dockerfile: docker/python/Dockerfile
+        container_name: nlp_server
+        restart: unless-stopped
+        command: uvicorn nlp_server:app --host 0.0.0.0 --port 8002
+        env_file:
+            - .env
+        depends_on:
+            - mysql
+        ports:
+            - "8002:8002"
+        volumes:
+            - .:/app
+
+    # =========================
+    # RAG server
+    # =========================
+    rag_server:
+        build:
+            context: .
+            dockerfile: docker/python/Dockerfile
+        container_name: rag_server
+        restart: unless-stopped
+        command: uvicorn rag_server:app --host 0.0.0.0 --port 8001
+        env_file:
+            - .env
+        depends_on:
+            - mysql
+        ports:
+            - "8001:8001"
+        volumes:
+            - .:/app
+
+volumes:
+    mysql_data:

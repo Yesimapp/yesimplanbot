@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+pydantic
+python-dotenv
+
+# DB
+databases
+sqlalchemy
+asyncmy
+mysql-connector-python
+
+# NLP
+spacy
+sentence-transformers
+torch
