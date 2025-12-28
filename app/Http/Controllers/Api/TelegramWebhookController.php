@@ -16,17 +16,14 @@ class TelegramWebhookController extends Controller
     public function handle(Request $request)
     {
         try {
-            /** ===============================
-             *  1. PARSE TELEGRAM UPDATE
-             *  =============================== */
+            Log::info('Telegram raw update', $request->all());
             $update = $request->all();
-
             $chatId = data_get($update, 'message.chat.id');
             $text   = data_get($update, 'message.text');
 
             // Telegram присылает много типов апдейтов — игнорируем всё лишнее
             if (!$chatId || !$text) {
-                return response()->json(['ok' => true]);
+                //return response()->json(['ok' => true]);
             }
 
             $data = [

@@ -19,4 +19,5 @@ Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
 });
 
 // для Telegram-бота
-Route::post('/telegram/webhook', [TelegramWebhookController::class, 'handle']);
+//Route::post('/telegram/webhook', [TelegramWebhookController::class, 'handle']);
+Route::match(['GET', 'POST'], '/telegram/webhook', [TelegramWebhookController::class, 'handle']);
