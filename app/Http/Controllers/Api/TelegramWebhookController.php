@@ -5,10 +5,10 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
-use App\Models\TelegramUser;
-use App\Models\TelegramMessage;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
+use App\Models\TelegramUser;
+use App\Models\TelegramMessage;
 use App\Models\Setting;
 
 class TelegramWebhookController extends Controller
@@ -16,334 +16,242 @@ class TelegramWebhookController extends Controller
     public function handle(Request $request)
     {
         try {
-            $data = $request->validate([
-                'chat_id'       => 'required|numeric',
-                'message'       => 'required|string',
-                'username'      => 'nullable|string',
-                'first_name'    => 'nullable|string',
-                'last_name'     => 'nullable|string',
-                'language_code' => 'nullable|string',
-                'is_bot'        => 'nullable|boolean',
-            ]);
+            /** ===============================
+             *  1. PARSE TELEGRAM UPDATE
+             *  =============================== */
+            $update = $request->all();
 
-            \Log::info('Request data:', $data);
+            $chatId = data_get($update, 'message.chat.id');
+            $text   = data_get($update, 'message.text');
 
-            $user = TelegramUser::updateOrCreate(['id' => $data['chat_id']], [
-                'username'      => $data['username'] ?? null,
-                'first_name'    => $data['first_name'] ?? null,
-                'last_name'     => $data['last_name'] ?? null,
-                'language_code' => $data['language_code'] ?? null,
-                'is_bot'        => $data['is_bot'] ?? false,
-            ]);
+            // Telegram присылает много типов апдейтов — игнорируем всё лишнее
+            if (!$chatId || !$text) {
+                return response()->json(['ok' => true]);
+            }
 
+            $data = [
+                'chat_id'       => $chatId,
+                'message'       => $text,
+                'username'      => data_get($update, 'message.from.username'),
+                'first_name'    => data_get($update, 'message.from.first_name'),
+                'last_name'     => data_get($update, 'message.from.last_name'),
+                'language_code' => data_get($update, 'message.from.language_code'),
+                'is_bot'        => data_get($update, 'message.from.is_bot', false),
+            ];
+
+            Log::info('Telegram message', $data);
+
+            /** ===============================
+             *  2. USER
+             *  =============================== */
+            $user = TelegramUser::updateOrCreate(
+                ['id' => $data['chat_id']],
+                [
+                    'username'      => $data['username'],
+                    'first_name'    => $data['first_name'],
+                    'last_name'     => $data['last_name'],
+                    'language_code' => $data['language_code'],
+                    'is_bot'        => $data['is_bot'],
+                ]
+            );
+
+            /** ===============================
+             *  3. NLP
+             *  =============================== */
             $nlp = $this->askNlp($data['message']);
-            \Log::info('NLP result:', $nlp);
 
             $country = $nlp['country'];
             $days    = $nlp['days'];
 
-            // NEW: подстраховка — если внешний NLP не выдал слоты, попробуем извлечь их простыми регэкспами
+            // fallback regex
             if (empty($country) || empty($days)) {
                 $fallback = $this->extractSlots($data['message']);
-                if (empty($country) && !empty($fallback['country'])) {
-                    $country = $fallback['country'];
-                }
-                if (empty($days) && !empty($fallback['days'])) {
-                    $days = $fallback['days'];
-                }
+                $country ??= $fallback['country'];
+                $days    ??= $fallback['days'];
             }
 
-            // NEW: “живость” — если не хватает РОВНО одного слота, доспросим только его
+            /** ===============================
+             *  4. DIALOG LOGIC
+             *  =============================== */
             if (empty($country) && !empty($days)) {
                 $reply = "Подскажите, в какую страну планируете поездку? 🙂";
-
-                $this->AddMessage($user->id, $data['message'], $reply);
-
-                return response()->json(['reply' => $reply]);
+                $this->saveMessage($user->id, $data['message'], $reply);
+                $this->sendTelegram($chatId, $reply);
+                return response()->json(['ok' => true]);
             }
 
             if (!empty($country) && empty($days)) {
                 $reply = "Отлично, {$country}! На сколько дней нужен интернет?";
-
-                $this->AddMessage($user->id, $data['message'], $reply);
-
-                return response()->json(['reply' => $reply]);
+                $this->saveMessage($user->id, $data['message'], $reply);
+                $this->sendTelegram($chatId, $reply);
+                return response()->json(['ok' => true]);
             }
 
-            //отправляем к боту если не нашел вытащить данные по стране и по количеству дней
+            /** ===============================
+             *  5. PLANS SEARCH
+             *  =============================== */
             if (empty($country) && empty($days)) {
-                $plans = collect();
-                $reply = $this->askGptWithPlans($data['message'], $plans, $user->id);
-
-                $this->AddMessage($user->id, $data['message'], $reply);
-
-                return response()->json(['reply' => $reply]);
-
+                $reply = $this->askGptWithPlans($data['message'], collect(), $user->id);
+                $this->saveMessage($user->id, $data['message'], $reply);
+                $this->sendTelegram($chatId, $reply);
+                return response()->json(['ok' => true]);
             }
 
             $query = DB::table('esim_plans');
 
-            if (!empty($days)) {
+            if ($days) {
                 $query->where('period', '>=', $days);
             }
 
-            if (!empty($country)) {
+            if ($country) {
                 $query->where('country', 'LIKE', "%{$country}%");
             }
 
-            // ВАЖНО: никаких лимитов/сокращений — как просили, выводим ВСЕ планы
             $plans = $query->get();
 
-            // формат и логика вывода — как у тебя: askGptWithPlans соберёт полный список в том же виде
             $reply = $this->askGptWithPlans($data['message'], $plans, $user->id);
 
-            \Log::info('Plans found:', ['count' => $plans->count()]);
+            $this->saveMessage($user->id, $data['message'], $reply);
+            $this->sendTelegram($chatId, $reply);
 
-            $this->AddMessage($user->id, $data['message'], $reply);
+            return response()->json(['ok' => true]);
 
-            return response()->json(['reply' => $reply]);
-
-        } catch (\Exception $e) {
-            \Log::error('Exception in handle:', [
+        } catch (\Throwable $e) {
+            Log::error('Telegram webhook error', [
                 'message' => $e->getMessage(),
                 'trace'   => $e->getTraceAsString(),
             ]);
 
-            $error_server = trim(Setting::get('error_server'));
+            $error = trim((string) Setting::get('error_server')) ?: 'Ошибка сервера';
 
-            return response()->json([
-                'reply' => '❌ ' . $error_server,
-                'error' => $e->getMessage(),
-            ], 500);
+            $this->sendTelegram(
+                data_get($request->all(), 'message.chat.id'),
+                "❌ {$error}"
+            );
+
+            return response()->json(['ok' => false], 500);
         }
     }
 
-    private function getConversationHistory(int $telegramUserId, int $limit = 10): array
+    /** ===============================
+     *  TELEGRAM SEND
+     *  =============================== */
+    private function sendTelegram(int $chatId, string $text): void
     {
-        $messages = TelegramMessage::where('telegram_user_id', $telegramUserId)
-            ->orderBy('id', 'desc')
-            ->take($limit)
-            ->get()
-            ->reverse();
-
-        $history = [];
-
-        foreach ($messages as $msg) {
-            if ($msg->question) {
-                $history[] = [
-                    'role' => 'user',
-                    'content' => $msg->question,
-                ];
-            }
-
-            if ($msg->answer) {
-                $history[] = [
-                    'role' => 'assistant',
-                    'content' => $msg->answer,
-                ];
-            }
-        }
-
-        return $history;
-    }
-
-    private function askNlp(string $query): array
-    {
-        try {
-            $response = Http::timeout(5)->post('http://127.0.0.1:8002/extract', [
-                'text' => $query,
-            ]);
-
-            if ($response->successful()) {
-                $data = $response->json();
-
-                return [
-                    'country' => $data['country'] ?? null,
-                    'days'    => $data['days'] ?? null,
-                ];
-            }
-
-            Log::error('NLP API error', [
-                'status' => $response->status(),
-                'body'   => $response->body(),
-            ]);
-        } catch (\Exception $e) {
-            Log::error('NLP exception', ['message' => $e->getMessage()]);
-        }
-
-        return [
-            'country' => null,
-            'days'    => null,
-        ];
-    }
-
-    private function askRag(string $query): string
-    {
-        try {
-            $response = Http::timeout(12)->post('http://127.0.0.1:8001/rag', ['query' => $query]);
-
-            if ($response->successful()) {
-                $json = $response->json();
-                if (!empty($json['ok']) && isset($json['context_text'])) {
-                    $facts = trim((string)($json['facts_text'] ?? ''));
-                    $ctx   = trim((string)($json['context_text'] ?? ''));
-                    return $facts !== '' ? $facts : $ctx; // приоритет — факты
-                }
-            }
-
-            Log::error('RAG API error', ['status' => $response->status(), 'body' => $response->body()]);
-            return '';
-        } catch (\Exception $e) {
-            Log::error('RAG exception', ['message' => $e->getMessage()]);
-            return '';
-        }
-    }
-
-    private function askGptWithPlans(string $userMessage, $plans, int $telegramUserId): string
-    {
-        // --- настройки ---
-        $systemPrompt       = trim((string) Setting::get('system_prompt'));
-        $systemPromptRag    = trim((string) Setting::get('system_prompt_rag'));
-        $limitRecords       = (int)   (Setting::get('message_history_limit') ?? 5);
-
-        // --- формируем контекст и выбираем system prompt ---
-        if (!$plans || $plans->isEmpty()) {
-            // 1) small talk перехватываем ДО RAG
-            if ($this->isSmallTalk($userMessage)) {
-                return $this->smallTalkReply($userMessage);
-            }
-
-            // 2) RAG-режим
-            $ragResult = $this->askRag($userMessage);
-            if ($ragResult === '' || trim($ragResult) === '') {
-                return "Пока не нашёл этого в базе. Могу помочь с eSIM‑планами — скажите страну и на сколько дней поездка.";
-            }
-
-            $effectiveSystemPrompt = $systemPromptRag !== '' ? $systemPromptRag : $systemPrompt;
-            $userContent =
-                "Пользователь: \"{$userMessage}\"\n\n" .
-                "Используй факты ниже для ответа человеческим языком (1–2 предложения). Источник не упоминай.\n" .
-                $ragResult; // здесь теперь чаще будет 'Факты из базы:\n- ...\n- ...'
-
-        } else {
-            // Режим с планами — выводим все планы (как просили)
-            $plansDescription = '';
-            foreach ($plans as $plan) {
-                $name     = $plan->plan_name ?? ($plan->name ?? 'Unnamed plan');
-                $price    = $plan->price ?? '—';
-                $currency = $plan->currency ?? '';
-                $period   = $plan->period ?? $plan->validity ?? null;
-
-                $plansDescription .= "🌐 Plan name: {$name}\n";
-                $plansDescription .= "💰 Price: {$price}" . ($currency ? " {$currency}" : "") . "\n";
-                if ($period !== null) {
-                    $plansDescription .= "📅 Validity period: {$period} дней\n";
-                }
-                $plansDescription .= "\n";
-            }
-
-            $effectiveSystemPrompt = $systemPrompt;
-            $userContent = "Пользователь написал: \"{$userMessage}\"\n\nКонтекст для ответа:\n{$plansDescription}";
-        }
-
-        // --- история диалога ---
-        $conversationHistory = $telegramUserId
-            ? $this->getConversationHistory($telegramUserId, $limitRecords)
-            : [];
-
-        // --- сборка сообщений ---
-        $messages = array_merge(
-            [['role' => 'system', 'content' => $effectiveSystemPrompt]],
-            (!$plans || $plans->isEmpty() ? $this->buildFewShotsForRag() : []), // few-shot только для RAG
-            $conversationHistory,                                               // <-- оставляем один раз
-            [['role' => 'user', 'content' => $userContent]]
+        Http::post(
+            'https://api.telegram.org/bot' . config('services.telegram.bot_token') . '/sendMessage',
+            [
+                'chat_id' => $chatId,
+                'text'    => $text,
+            ]
         );
-
-        Log::info('Message to GPT', ['messages' => $messages]);
-
-        // --- вызов OpenAI ---
-        $result = $this->SendGpt($messages);
-
-        return $result;
     }
 
+    /** ===============================
+     *  NLP
+     *  =============================== */
+    private function askNlp(string $text): array
+    {
+        try {
+            $res = Http::timeout(5)->post('http://127.0.0.1:8002/extract', [
+                'text' => $text,
+            ]);
 
-    /*
-     * сохранение ответа в базе данных
-     * для дольнейше использования в истории сообщений
-     */
-    private function AddMessage($id , $message, $answer): bool
+            if ($res->successful()) {
+                return [
+                    'country' => $res->json('country'),
+                    'days'    => $res->json('days'),
+                ];
+            }
+        } catch (\Throwable $e) {
+            Log::warning('NLP failed', ['error' => $e->getMessage()]);
+        }
+
+        return ['country' => null, 'days' => null];
+    }
+
+    /** ===============================
+     *  GPT + RAG
+     *  =============================== */
+    private function askGptWithPlans(string $userMessage, $plans, int $userId): string
+    {
+        if ($plans->isEmpty()) {
+            if ($this->isSmallTalk($userMessage)) {
+                return $this->smallTalkReply();
+            }
+
+            $rag = $this->askRag($userMessage);
+            if ($rag === '') {
+                return 'Могу помочь с eSIM-планами. Скажите страну и срок поездки.';
+            }
+
+            return $this->sendGpt([
+                ['role' => 'system', 'content' => Setting::get('system_prompt_rag')],
+                ['role' => 'user', 'content' => $rag],
+            ]);
+        }
+
+        $desc = '';
+        foreach ($plans as $p) {
+            $desc .= "🌐 {$p->plan_name}\n💰 {$p->price} {$p->currency}\n📅 {$p->period} дней\n\n";
+        }
+
+        return $this->sendGpt([
+            ['role' => 'system', 'content' => Setting::get('system_prompt')],
+            ['role' => 'user', 'content' => $desc],
+        ]);
+    }
+
+    private function sendGpt(array $messages): string
+    {
+        $res = Http::withToken(env('OPENAI_API_KEY'))
+            ->post('https://api.openai.com/v1/chat/completions', [
+                'model' => env('OPENAI_MODEL', 'gpt-4o'),
+                'messages' => $messages,
+                'temperature' => 0.3,
+                'max_tokens' => 500,
+            ]);
+
+        return $res->json('choices.0.message.content') ?? 'Ошибка GPT';
+    }
+
+    /** ===============================
+     *  HELPERS
+     *  =============================== */
+    private function saveMessage(int $userId, string $q, string $a): void
     {
         TelegramMessage::create([
-            'telegram_user_id' => $id,
-            'question'         => $message,
-            'answer'           => $answer,
+            'telegram_user_id' => $userId,
+            'question' => $q,
+            'answer'   => $a,
         ]);
-        return  true;
     }
 
-    private function SendGpt($messages): string
+    private function isSmallTalk(string $t): bool
     {
-        $temperature        = (float) (Setting::get('temperature') ?? 0.3);
-        $maxTokens          = (int)   (Setting::get('max_tokens') ?? 500);
-        $frequencyPenalty   = (float) (Setting::get('frequency_penalty') ?? 0.1);
-        $presencePenalty    = (float) (Setting::get('presence_penalty') ?? 0.0);
-        $topP               = (float) (Setting::get('top_p') ?? 1.0);
+        return (bool) preg_match('/(привет|здравств|hello|hi|как\s*дела)/iu', $t);
+    }
 
+    private function smallTalkReply(): string
+    {
+        return 'Привет! Помогу подобрать eSIM. Куда и на сколько дней едете?';
+    }
 
-        $response = Http::withToken(env('OPENAI_API_KEY'))
-            ->post('https://api.openai.com/v1/chat/completions', [
-                'model'              => env('OPENAI_MODEL', 'gpt-4o'), // при желании обнови модель
-                'messages'           => $messages,
-                'temperature'        => $temperature,
-                'top_p'              => $topP,
-                'frequency_penalty'  => $frequencyPenalty,
-                'presence_penalty'   => $presencePenalty,
-                'max_tokens'         => $maxTokens,
-            ]);
+    private function extractSlots(string $t): array
+    {
+        return [
+            'country' => preg_match('/(?:в|to)\s+([A-Za-zА-Яа-яёЁ\- ]{2,})/u', $t, $m) ? trim($m[1]) : null,
+            'days'    => preg_match('/(\d{1,3})\s*(?:дн|дней|day|days)/iu', $t, $m) ? (int)$m[1] : null,
+        ];
+    }
 
-        if ($response->successful()) {
-            $json = $response->json();
-            if (isset($json['choices'][0]['message']['content'])) {
-                $answer = trim($json['choices'][0]['message']['content']);
-                return $answer !== '' ? $answer : 'Ответ пуст. Попробуйте переформулировать запрос.';
-            }
+    private function askRag(string $q): string
+    {
+        try {
+            $res = Http::timeout(10)->post('http://127.0.0.1:8001/rag', ['query' => $q]);
+            return $res->json('context_text') ?? '';
+        } catch (\Throwable) {
+            return '';
         }
-
-        Log::error('OpenAI API error', ['status' => $response->status(), 'body' => $response->body()]);
-        return '❌ Ошибка от GPT.';
-
-    }
-
-    private function buildFewShotsForRag(): array
-    {
-        return [
-            ['role' => 'user', 'content' => 'привет!'],
-            ['role' => 'assistant', 'content' => 'Привет! Готов помочь с eSIM. Куда и на сколько дней планируете поездку?'],
-
-            ['role' => 'user', 'content' => 'поддерживается ли eSIM на моём телефоне?'],
-            ['role' => 'assistant', 'content' => 'Пока не нашёл этого в базе. Могу помочь с выбором плана: скажите страну и длительность поездки.'],
-        ];
-    }
-
-    private function isSmallTalk(string $text): bool {
-        // более надёжно для кириллицы и фразы "как дела"
-        return (bool) preg_match('/(привет|здравств|спасибо|как\s*дела|hi|hello)/iu', $text);
-    }
-
-    private function smallTalkReply(string $text): string {
-        $variants = [
-            "Привет! Готов помочь с eSIM. Куда и на сколько дней планируете поездку?",
-            "Здравствуйте! Подскажу по eSIM‑планам. В какую страну и на какой срок едете?",
-            "Привет! Давайте подберём eSIM. Скажите страну и длительность поездки.",
-        ];
-        return $variants[array_rand($variants)];
-    }
-
-    private function extractSlots(string $t): array {
-        return [
-            'country' => preg_match('/(?:в|to)\s+([A-Za-zА-Яа-яёЁ\- ]{2,})/u', $t, $m) ? trim($m[1]) : null, // NEW: поддержал "to Turkey"
-            'days'    => preg_match('/(\d{1,3})\s*(?:дн|дней|day|days)/iu', $t, $m) ? (int)$m[1] : (preg_match('/\bна\s+(\d{1,3})\b/iu', $t, $m2) ? (int)$m2[1] : null),
-        ];
     }
 }
